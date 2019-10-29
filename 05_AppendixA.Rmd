@@ -1,0 +1,173 @@
+---
+title: "Appendix A: Evaluation of 2018 Mitigations"
+author: "Karl Tupper"
+date: "November 2019"
+output: 
+  html_document
+---
+
+## Executive Summary
+
+> **This analysis updated from the District's "Preliminary Review Letter" of State Parks' February 21, 2019, Draft Particulate Matter Reduction Plan (letter [here](https://storage.googleapis.com/slocleanair-org/images/cms/upload/files/Feb%2025%202019%20APCD%20Response%20to%20SP-Feb%201%202019%20PMRP%20%28Signed%29%20%281%29.pdf), code [here](https://github.com/sloapcdkt/2018DiD)).**
+> **The previous analysis used preliminary data from the District's in-house database for 2018; the current analysis uses validated data from AQS. The results are indentical.**
+
+The Annual Air Quality Report for 2017 (Appendix A; full report [here](https://storage.googleapis.com/slocleanair-org/images/cms/upload/files/2017aqrt-FINAL2.pdf) and data and code [here](https://github.com/sloapcdkt/2017aqrptR)) proposed a "Difference in Differences" approach evaluating the the effectiveness of ODSVRA mitigations. In a nutshell this method looks at the ratio of PM10 concentrations between CDF and Oso Flaco on wind event days, as asks whether that ratio changes from one year to the next. The idea is that using Oso Flaco as a control site implicitly controls for inter-annual variations in meteorology.
+
+Applying this methodology to the preliminary 2018 dataset, **shows a statistically significant decline of 22% in CDF PM10 relative to Oso Flaco PM10.** 
+
+## Details
+
+This method requires PM10 data from Oso Flaco and CDF as well as wind data from CDF and the S1 tower. The 2018 dataset from CDF and Oso Flaco is not yet fully validated so this analysis must be considered preliminary. (Federal regulations give until May 1 to fully validate the 2018 data, though we expect to complete the validation process well before then. At any rate, we do not expect any significant changes to the data.) The S1 data used in this analysis was obtained from State Parks, and its validation status is unknown.
+
+The first full year of data from Oso Flaco was 2016, thus the only year-to-year comparisons that are possible are 2016 vs 2017, 2016 vs 2018, and 2017 vs 2018. The Annual Air Quality Report cited above compared 2016 and 2017 and found no significant difference in the CDF/Oso ratio. This was not surprising, since the ODSVRA mitigations for those years were small (40 and 20 acres, respectively), and the change from year to year was also small (20 acres). As discussed in that report, 2017 was selected as the baseline to compare future years to, since it had the least amount of mitigation and is thus the closest possible scenario to a fully un-mitigated baseline. This analysis thus compares 2018 to 2017.
+
+```{r analysis}
+##---------------LOAD and FORMAT RAW DATA-------------------------------##
+
+##########################
+## 2018 S1 tower Data:
+##########################
+
+## S1 data from T&B Systems
+## only Feb 9 to March 29, 2018
+s1a <- read.csv("vdv_2018-01-01 00_00_00_2019-01-01 00_00_00_20190104215619.csv", 
+                skip = 5, as.is = TRUE)
+s1a <- s1a[, c(1, 14, 24)]
+names(s1a) <- c("date", "wd.s1", "ws.s1")
+s1a$date <- as.POSIXct(as.character(s1a$date), tz="UTC", format="%Y-%m-%d %H:%M:%S")
+
+## S1 data from STS Tracer
+## March 8, 2018 onward
+s1b <- read.csv("Export.csv", as.is = TRUE)
+s1b <- s1b[, c(1, 10, 2)]
+names(s1b) <- c("date", "wd.s1", "ws.s1")
+s1b$date <- as.POSIXct(as.character(s1b$date), tz="UTC", format="%m/%d/%Y %H:%M:%S")
+
+## merge (this seems to tolerate repeated rows)
+s1 <- rbind(s1a[1:648, ], s1b)
+s1$year <- format(s1$date, "%Y")
+s1 <- s1[s1$year < 2019, ]
+s1$year <- NULL
+
+## check
+summary(s1) # looks reasonable
+
+#############################
+## 2016/2017 Data from 2017 annual report:
+#############################
+
+## see from 2017 AQR
+data <- read.csv("DiD.csv", as.is = TRUE)
+data$date <- as.POSIXct(data$date, tz = "UTC")
+
+##############################
+## 2018 data from AQS
+##############################
+
+source('00_AQSloader.R')
+data2018 <- load.aqs("AMP501_1775849-0.txt")
+names(data2018) <- names(data)[1:5]
+data2018$date <- as.POSIXct(data2018$date, format = "%d-%b-%Y %H:%M", tz = "UTC")
+
+#############################
+## merge datasets:
+#############################
+data2018 <- merge(data2018, s1, by = "date", all = TRUE)
+data <- rbind(data, data2018)
+rm(data2018, s1, s1a, s1b)
+
+## Create 24-hour averages and dataframe for first analysis
+dd <-data[, c("date", "pm10.cdf", "pm10.oso")]   # just need these variable for this
+names(dd) <- c("date", "cdf", "oso")             # rename for simplicity
+dd <- dd[complete.cases(dd), ]                   # so that if a CDF hour is missing, the Oso 
+                                                 # hour is also removed
+dd <- data.frame(openair::timeAverage(dd, avg.time = "day", data.thresh = 75))
+dd <- dd[complete.cases(dd), ]
+dd$year <- format(dd$date, "%Y")
+
+
+##---------------Run Analyses-------------------------------##
+library(nlme)
+
+## create time index so that missing values are properly accounted for
+dd$index <- as.Date(dd$date) - as.Date(dd$date[1])
+
+## Figure out Event days
+
+## back to hourly data: create needed variables
+data$hour <- format(data$date, "%H")
+data$day <- format(data$date, "%Y-%m-%d")
+
+## figure out days meeting decision tree rule. 
+rule1.days <- data[data$hour == "15" & data$ws.s1 > 9.445, "day"]
+rule2.days <- data[data$hour == "13" & data$wd.cdf > 289.5, "day"]
+event.days <- intersect(rule1.days, rule2.days)
+
+## subset daily data to just these event days:
+dd$day <- format(dd$date, "%Y-%m-%d")
+dd.events <- dd[dd$day %in% event.days, ]
+
+## Check: Reproduce 2016/2017 analysis
+## results should match https://github.com/sloapcdkt/2017aqrptR/blob/master/06_AppendixA.Rmd
+event1 <-  gls(cdf - oso ~ year, data = dd.events, subset = year!=2018,
+               correlation = corCAR1(form = ~index))
+summary(event1) # same!
+
+event1.log <-  gls(log(cdf/oso) ~ year, data = dd.events, subset = year!=2018,
+               correlation = corCAR1(form = ~index))
+summary(event1.log) # same!
+
+
+## Analyze 2018 vs 2017
+event2 <-  gls(log(cdf/oso) ~ year, data = dd.events, subset = year!=2016, 
+               correlation = corCAR1(form = ~index))
+summary(event2) # p-value = 0.0061
+1 - exp(coef(event2)[2]) # 22% reduction on event days!
+qqnorm(event2)  # looks good
+shapiro.test(residuals(event2)) # p-value = 0.5398952
+acf(residuals(event2, type = "normalized")) # great!
+
+## confidence intervals for % reduction
+1-exp(confint(event2))
+
+## for inline text below
+x <- summary(event2)$tTable
+pv <- x[2, 4]
+```
+
+Running the analysis comparing 2018 to 2017, shows a statistically significant decrease in event-day CDF PM10 relative Oso Flaco of `r round(100 - 100*exp(coef(event2)[2]), 1)`% (95% CI: `r paste(rev(round(100*(1-exp(confint(event2)[2, ])), 1)), collapse = " - ")`% ;p-value: `r round(pv, 4)`). 
+
+This is visualized below. Displayed are box-plots of the CDF/Oso Flaco ratio for 2016 through 2018. As can be seen, the ratios for 2018 are shifted to lower values compared to the earlier years.
+
+```{r, echo = FALSE}
+boxplot((cdf/oso) ~ year, data = dd.events,
+        ylab = "CDF PM10 / Oso Flaco PM10",
+        main = "CDF to Oso Flaco PM10 Ratio on Wind Event Days")
+
+
+## create .svg for report:
+
+svglite::svglite("figA1.svg", width = 6.5, height = 5.5, 
+    pointsize = 11)
+boxplot((cdf/oso) ~ year, data = dd.events,
+        ylab = "CDF PM10 / Oso Flaco PM10",
+        xlab = "",
+        main = "")
+
+dev.off()
+```
+
+In principle, the decrease in the ratio could be due to either a decrease in the CDF levels or an increase in Oso Flaco levels. To make sure it's not the latter we can look at the (geometric) average PM10 levels on the wind event days. As shown in the table below, the average for 2018 is indeed lower than for 2016 and 2017, and rather than increasing in 2018, the average level for Oso Flaco actually decreased. Thus, the decline in the CDF/Oso Flaco ration can be attributed to declining CDF levels rather than increasing Oso Flaco levels.
+
+```{r, echo = FALSE}
+
+geomean <- function(a) round(exp(mean(log(a)), 1))
+geomean <- function(a) exp(mean(log(a)))
+  
+CDF <- tapply(dd.events$cdf, dd.events$year, geomean)
+Oso <- tapply(dd.events$oso, dd.events$year, geomean)
+
+knitr::kable(rbind(CDF, Oso), row.names(c("CDF", "Oso Flaco")),
+             caption = "(Geometric) Average PM10 levels on Wind Event Days:",
+             digits = 1)
+```
